@@ -145,7 +145,7 @@
   ln();
   const wave1 = dedupLosers.length + suitelessLosers.length + noteMerges.length + suitelessNoteMerges.length;
   ln(`1. **Wave 1 — Deduplication** (${wave1.toLocaleString()} changes, ~${Math.ceil(wave1 * 350 / 60000)} min)`);
-  ln("   - Marks duplicate copies as "Duplicate"");
+  ln('   - Marks duplicate copies as \'Duplicate\'');
   ln("   - Saves any useful notes or phone numbers onto the kept copy");
   ln();
   ln(`2. **Wave 2 — Fix stale duplicates** (${dupToNew.length.toLocaleString()} changes, ~${Math.ceil(dupToNew.length * 350 / 60000)} min)`);
@@ -240,11 +240,11 @@
   // ════════════════════════════════════════════════════════
   if (dupToNew.length > 0) {
     ln("---");
-    ln("## Wave 2: Stale Duplicates Restored to "New"");
+    ln('## Wave 2: Stale Duplicates Restored to \'New\'');
     ln();
-    ln("These addresses are currently marked as "Duplicate" but they don't actually");
+    ln("These addresses are currently marked as 'Duplicate' but they don't actually");
     ln("have any duplicate. They were probably marked by accident or during a previous");
-    ln("cleanup. We're restoring them to "New" so they show up in territory assignments.");
+    ln("cleanup. We're restoring them to 'New' so they show up in territory assignments.");
     ln();
 
     const SHOW_LIMIT = 50;
