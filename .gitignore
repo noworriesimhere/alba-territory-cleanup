@@ -1,0 +1,6 @@
+node_modules/
+dist/
+test/fixtures/production-sample.json
+.claude/
+*.log
+.DS_Store

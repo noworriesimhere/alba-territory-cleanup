@@ -1,0 +1,13 @@
+{
+  "name": "alba-territory-cleanup",
+  "version": "2.0.0",
+  "description": "Territory address cleanup tool for Alba (mcmxiv.com). Deduplication, status management, language filtering, and map pin jitter.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:verbose": "node --test --test-reporter=spec test/*.test.js",
+    "build": "node scripts/build-browser.js"
+  },
+  "keywords": ["alba", "territory", "cleanup"],
+  "license": "MIT"
+}
