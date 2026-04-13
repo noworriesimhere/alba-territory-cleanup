@@ -24,6 +24,57 @@ export function truncateNotes(notes, config) {
   return notes.slice(0, breakPoint).trimEnd() + marker;
 }
 
+export const WAVE_TAGS = Object.freeze({
+  dedup: Object.freeze([
+    "set-duplicate",
+    "set-duplicate-suiteless",
+    "merge-notes",
+    "merge-notes-suiteless",
+  ]),
+  dupToNew: Object.freeze(["dup-to-new"]),
+  language: Object.freeze(["set-language"]),
+  jitter: Object.freeze(["jitter"]),
+});
+
+export function entryHasAnyTag(entry, tags) {
+  return tags.some((tag) => entry.tags.has(tag));
+}
+
+export function buildWavePayload(original, entry, activeTags) {
+  const tags = new Set(activeTags);
+  const payload = makePayload(original);
+
+  if (
+    (tags.has("set-duplicate") ||
+      tags.has("set-duplicate-suiteless") ||
+      tags.has("dup-to-new")) &&
+    entry.payload.status !== original.status
+  ) {
+    payload.status = entry.payload.status;
+  }
+
+  if (
+    (tags.has("merge-notes") || tags.has("merge-notes-suiteless")) &&
+    entry.payload.notes !== (original.notes || null)
+  ) {
+    payload.notes = entry.payload.notes;
+  }
+
+  if (
+    tags.has("set-language") &&
+    entry.payload.language_id !== original.language_id
+  ) {
+    payload.language_id = entry.payload.language_id;
+  }
+
+  if (tags.has("jitter")) {
+    payload.location_lat = entry.payload.location_lat;
+    payload.location_lng = entry.payload.location_lng;
+  }
+
+  return payload;
+}
+
 // ───────────────────────────────────────────────────────────
 // Language discovery (pure filter — the API fetch is in the
 // browser harness; this just classifies what came back)
@@ -516,6 +567,17 @@ export function buildPlan(addresses, dedup, statuses, languages, jitterChanges, 
   for (const [id, entry] of plan) {
     const orig = addrMap.get(id);
     if (!orig) { plan.delete(id); continue; }
+
+    // DNC is sacred: no plan entry is ever allowed to change a DNC status.
+    if (
+      orig.status === config.STATUS.DNC &&
+      entry.payload.status !== config.STATUS.DNC
+    ) {
+      entry.payload.status = config.STATUS.DNC;
+      entry.tags.delete("set-duplicate");
+      entry.tags.delete("set-duplicate-suiteless");
+      entry.tags.delete("dup-to-new");
+    }
 
     const p = entry.payload;
     const unchanged =

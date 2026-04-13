@@ -15,6 +15,7 @@
 
   const plan = window.__albaPlan;
   const addrs = window.__albaAddresses;
+  const analysis = window.__albaAnalysis || null;
   const addrMap = new Map(addrs.map(a => [a.id, a]));
 
   const STATUS_LABEL = {
@@ -34,6 +35,32 @@
   };
   const statusOf = (code) => STATUS_LABEL[code] || `Unknown (${code})`;
   const territory = (a) => a.territory_number || "—";
+  const cleanInline = (value, max = 120) => {
+    const text = (value || "—")
+      .replace(/\r/g, "")
+      .replace(/\n+/g, " / ")
+      .replace(/\s+/g, " ")
+      .trim();
+    const shortened = text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
+    return shortened.replace(/\|/g, "\\|");
+  };
+  const writeTextBlock = (label, value) => {
+    ln(`**${label}:**`);
+    ln();
+    ln("```text");
+    ln((value || "—").replace(/\r/g, ""));
+    ln("```");
+    ln();
+  };
+
+  const WAVE_TAGS = {
+    dedup: ["set-duplicate", "set-duplicate-suiteless", "merge-notes", "merge-notes-suiteless"],
+    dupToNew: ["dup-to-new"],
+    language: ["set-language"],
+    jitter: ["jitter"],
+  };
+  const hasAnyTag = (entry, tags) => tags.some(tag => entry.tags.has(tag));
+  const getWaveEntries = (tags) => plan.filter(entry => hasAnyTag(entry, tags));
 
   // ── Categorize plan entries ──
   const dedupLosers = [];
@@ -55,60 +82,85 @@
   }
 
   // ── Group dedup losers by their keeper ──
-  // We need to reconstruct which losers go with which keeper.
-  // Losers share the same normalized address+suite as their keeper.
   const norm = s => (s || "").toLowerCase().trim();
-  const dedupGroups = new Map(); // key → { keeper entry (if in plan), loser entries }
 
   // First pass: identify all loser IDs
   const loserIds = new Set(dedupLosers.map(e => e.id));
   const suitelessLoserIds = new Set(suitelessLosers.map(e => e.id));
 
-  // Group all addresses by normalized key
-  const addrGroups = new Map();
-  for (const a of addrs) {
-    const addr = norm(a.address);
-    if (!addr) continue;
-    const key = `${addr}|${norm(a.suite)}`;
-    if (!addrGroups.has(key)) addrGroups.set(key, []);
-    addrGroups.get(key).push(a);
-  }
-
   // Build dedup group display data
-  const dedupGroupDisplay = [];
-  for (const [key, group] of addrGroups) {
-    const groupLosers = group.filter(a => loserIds.has(a.id));
-    if (groupLosers.length === 0) continue;
-    const keeper = group.find(a => !loserIds.has(a.id)) || group[0];
-    const keeperPlanEntry = plan.find(e => e.id === keeper.id);
-    dedupGroupDisplay.push({
-      key, keeper, losers: groupLosers,
-      newNotes: keeperPlanEntry?.payload?.notes || null,
-      oldNotes: keeper.notes,
-    });
+  const dedupGroupDisplay = analysis
+    ? analysis.dedup.actions.map(action => ({
+        key: action.key,
+        keeper: action.keeper,
+        losers: action.losers,
+        newNotes: action.newKeeperNotes,
+        oldNotes: action.keeper.notes,
+      }))
+    : [];
+
+  if (!analysis) {
+    const addrGroups = new Map();
+    for (const a of addrs) {
+      const addr = norm(a.address);
+      if (!addr) continue;
+      const key = `${addr}|${norm(a.suite)}`;
+      if (!addrGroups.has(key)) addrGroups.set(key, []);
+      addrGroups.get(key).push(a);
+    }
+
+    for (const [key, group] of addrGroups) {
+      const groupLosers = group.filter(a => loserIds.has(a.id));
+      if (groupLosers.length === 0) continue;
+      const keeper = group.find(a => !loserIds.has(a.id)) || group[0];
+      const keeperPlanEntry = plan.find(e => e.id === keeper.id);
+      dedupGroupDisplay.push({
+        key,
+        keeper,
+        losers: groupLosers,
+        newNotes: keeperPlanEntry?.payload?.notes || null,
+        oldNotes: keeper.notes,
+      });
+    }
   }
   dedupGroupDisplay.sort((a, b) => b.losers.length - a.losers.length);
 
   // Build suiteless group display
-  const suitelessGroupDisplay = [];
-  const addrOnlyGroups = new Map();
-  for (const a of addrs) {
-    const addr = norm(a.address);
-    if (!addr) continue;
-    if (!addrOnlyGroups.has(addr)) addrOnlyGroups.set(addr, []);
-    addrOnlyGroups.get(addr).push(a);
-  }
-  for (const [addr, group] of addrOnlyGroups) {
-    const groupLosers = group.filter(a => suitelessLoserIds.has(a.id));
-    if (groupLosers.length === 0) continue;
-    const suitedEntries = group.filter(a => !!norm(a.suite));
-    suitelessGroupDisplay.push({
-      address: group[0].address,
-      losers: groupLosers,
-      suitedCount: suitedEntries.length,
-    });
+  const suitelessGroupDisplay = analysis
+    ? analysis.suiteless.actions.map(action => ({
+        address: action.suitelessLosers[0]?.address || action.suiteKeeper.address,
+        losers: action.suitelessLosers,
+        suitedCount: addrs.filter(a => norm(a.address) === action.address && !!norm(a.suite)).length,
+      }))
+    : [];
+
+  if (!analysis) {
+    const addrOnlyGroups = new Map();
+    for (const a of addrs) {
+      const addr = norm(a.address);
+      if (!addr) continue;
+      if (!addrOnlyGroups.has(addr)) addrOnlyGroups.set(addr, []);
+      addrOnlyGroups.get(addr).push(a);
+    }
+    for (const [addr, group] of addrOnlyGroups) {
+      const groupLosers = group.filter(a => suitelessLoserIds.has(a.id));
+      if (groupLosers.length === 0) continue;
+      const suitedEntries = group.filter(a => !!norm(a.suite));
+      suitelessGroupDisplay.push({
+        address: group[0].address,
+        losers: groupLosers,
+        suitedCount: suitedEntries.length,
+      });
+    }
   }
   suitelessGroupDisplay.sort((a, b) => b.losers.length - a.losers.length);
+
+  const waveCounts = {
+    dedup: getWaveEntries(WAVE_TAGS.dedup).length,
+    dupToNew: getWaveEntries(WAVE_TAGS.dupToNew).length,
+    language: getWaveEntries(WAVE_TAGS.language).length,
+    jitter: getWaveEntries(WAVE_TAGS.jitter).length,
+  };
 
   // ════════════════════════════════════════════════════════
   // BUILD THE REPORT
@@ -143,18 +195,17 @@
   ln();
   ln("We do this in separate waves so we can check each one before moving on.");
   ln();
-  const wave1 = dedupLosers.length + suitelessLosers.length + noteMerges.length + suitelessNoteMerges.length;
-  ln(`1. **Wave 1 — Deduplication** (${wave1.toLocaleString()} changes, ~${Math.ceil(wave1 * 350 / 60000)} min)`);
+  ln(`1. **Wave 1 — Deduplication** (${waveCounts.dedup.toLocaleString()} changes, ~${Math.ceil(waveCounts.dedup * 350 / 60000)} min)`);
   ln('   - Marks duplicate copies as \'Duplicate\'');
   ln("   - Saves any useful notes or phone numbers onto the kept copy");
   ln();
-  ln(`2. **Wave 2 — Fix stale duplicates** (${dupToNew.length.toLocaleString()} changes, ~${Math.ceil(dupToNew.length * 350 / 60000)} min)`);
+  ln(`2. **Wave 2 — Fix stale duplicates** (${waveCounts.dupToNew.toLocaleString()} changes, ~${Math.ceil(waveCounts.dupToNew * 350 / 60000)} min)`);
   ln("   - Addresses that were previously marked Duplicate but have no actual duplicate");
   ln();
-  ln(`3. **Wave 3 — Fix blank languages** (${langFixes.length.toLocaleString()} changes, ~${Math.ceil(langFixes.length * 350 / 60000)} min)`);
+  ln(`3. **Wave 3 — Fix blank languages** (${waveCounts.language.toLocaleString()} changes, ~${Math.ceil(waveCounts.language * 350 / 60000)} min)`);
   ln("   - Sets blank language fields to Chinese Mandarin");
   ln();
-  ln(`4. **Wave 4 — Fix map pins** (${jitterFixes.length.toLocaleString()} changes, ~${Math.ceil(jitterFixes.length * 350 / 60000)} min)`);
+  ln(`4. **Wave 4 — Fix map pins** (${waveCounts.jitter.toLocaleString()} changes, ~${Math.ceil(waveCounts.jitter * 350 / 60000)} min)`);
   ln("   - Spreads overlapping map pins so each apartment is clickable");
   ln();
 
@@ -183,6 +234,7 @@
 
     // Show top 30 groups in detail, summarize the rest
     const DETAIL_LIMIT = 30;
+    const ROW_LIMIT = 15;
     const showDetailed = dedupGroupDisplay.slice(0, DETAIL_LIMIT);
     const remaining = dedupGroupDisplay.slice(DETAIL_LIMIT);
 
@@ -190,17 +242,23 @@
       const k = group.keeper;
       ln(`#### 📍 ${fmt(k)} — ${territory(k)}`);
       ln();
-      ln(`**Keeping** (ID ${k.id}): status = ${statusOf(k.status)}, notes = "${k.notes || "—"}"`)
+      ln(`**Keeping** (ID ${k.id}): status = ${statusOf(k.status)}`);
+      ln();
+      ln(`Current notes: ${cleanInline(k.notes, 180)}`);
       if (group.newNotes && group.newNotes !== k.notes) {
         ln();
-        ln(`**Updated notes after merge:** "${group.newNotes}"`);
+        writeTextBlock("Updated notes after merge", group.newNotes);
       }
       ln();
-      ln("| # | ID | Before Status | Notes | Phone |");
-      ln("|---|---:|---------------|-------|-------|");
-      for (let i = 0; i < group.losers.length; i++) {
+      ln("| # | ID | Before Status | Notes Preview | Phone |");
+      ln("|---|---:|---------------|---------------|-------|");
+      for (let i = 0; i < Math.min(group.losers.length, ROW_LIMIT); i++) {
         const l = group.losers[i];
-        ln(`| ${i + 1} | ${l.id} | ${statusOf(l.status)} → **Duplicate** | ${l.notes || "—"} | ${l.telephone || "—"} |`);
+        ln(`| ${i + 1} | ${l.id} | ${statusOf(l.status)} → **Duplicate** | ${cleanInline(l.notes, 90)} | ${cleanInline(l.telephone, 40)} |`);
+      }
+      if (group.losers.length > ROW_LIMIT) {
+        ln();
+        ln(`*…and ${group.losers.length - ROW_LIMIT} more duplicate copies in this group.*`);
       }
       ln();
     }
@@ -311,15 +369,16 @@
     const buildingCounts = new Map();
     for (const e of jitterFixes) {
       const a = addrMap.get(e.id);
-      const bldg = `${a.address} (${territory(a)})`;
-      buildingCounts.set(bldg, (buildingCounts.get(bldg) || 0) + 1);
+      const key = `${a.address || "(no address)"}|||${territory(a)}`;
+      buildingCounts.set(key, (buildingCounts.get(key) || 0) + 1);
     }
     const sortedBuildings = [...buildingCounts.entries()].sort((a, b) => b[1] - a[1]);
 
     ln("| Building | Territory | Pins adjusted |");
     ln("|----------|-----------|--------------|");
-    for (const [bldg, count] of sortedBuildings.slice(0, 30)) {
-      ln(`| ${bldg} | ${count} |`);
+    for (const [key, count] of sortedBuildings.slice(0, 30)) {
+      const [building, terr] = key.split("|||");
+      ln(`| ${cleanInline(building, 80)} | ${cleanInline(terr, 30)} | ${count} |`);
     }
     if (sortedBuildings.length > 30) {
       ln();
@@ -338,9 +397,15 @@
     return a && a.status === 3;
   });
   const dncStatusChanged = dncInPlan.filter(e => e.payload.status !== 3);
+  const preservedDncDuplicates = analysis
+    ? analysis.dedup.actions.flatMap(action => action.losers).filter(a => a.status === 3).length
+    : 0;
   ln(`- Total DNC addresses: **${dncAddrs.length}**`);
   ln(`- DNC addresses touched by the plan: **${dncInPlan.length}** (only for note merges or jitter — never status changes)`);
   ln(`- DNC addresses with status changed: **${dncStatusChanged.length}** ${dncStatusChanged.length === 0 ? "✅ None — DNC is safe" : "⚠️ THIS SHOULD BE ZERO"}`);
+  if (preservedDncDuplicates > 0) {
+    ln(`- Exact-duplicate DNC copies intentionally left unchanged: **${preservedDncDuplicates}**`);
+  }
   ln();
 
   // ── Footer ──

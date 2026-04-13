@@ -53,7 +53,63 @@ const CONFIG = {
   CHINESE_LANGUAGE_IDS: [],  // auto-populated at runtime
 };
 
+const WAVE_DEFS = Object.freeze([
+  {
+    key: "dedup",
+    title: "Wave 1: Deduplication",
+    reviewLabel: "deduplication",
+    tags: WAVE_TAGS.dedup,
+  },
+  {
+    key: "dup-to-new",
+    title: "Wave 2: Fix stale duplicates",
+    reviewLabel: "stale duplicate fixes",
+    tags: WAVE_TAGS.dupToNew,
+  },
+  {
+    key: "language",
+    title: "Wave 3: Fix blank languages",
+    reviewLabel: "language fixes",
+    tags: WAVE_TAGS.language,
+  },
+  {
+    key: "jitter",
+    title: "Wave 4: Fix map pins",
+    reviewLabel: "map pin adjustments",
+    tags: WAVE_TAGS.jitter,
+  },
+]);
+
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function buildDatasetFingerprint(addresses, plan) {
+  const sample = [
+    addresses.length,
+    plan.length,
+    ...addresses.slice(0, 10).map(a => \`\${a.id}:\${a.modified_ts || ""}\`),
+    ...addresses.slice(-10).map(a => \`\${a.id}:\${a.modified_ts || ""}\`),
+  ].join("|");
+
+  let hash = 0;
+  for (let i = 0; i < sample.length; i++) {
+    hash = (hash * 31 + sample.charCodeAt(i)) >>> 0;
+  }
+  return hash.toString(36);
+}
+
+function getWaveEntries(plan, waveDef) {
+  return plan.filter(entry => entryHasAnyTag(entry, waveDef.tags));
+}
+
+async function waitForManualContinue(message) {
+  log("⏸️", message);
+  await new Promise(resolve => {
+    window.__albaContinue = () => {
+      delete window.__albaContinue;
+      resolve();
+    };
+  });
+}
 
 function log(icon, msg) {
   console.log(\`%c\${icon} \${msg}\`, "font-size:13px;");
@@ -162,31 +218,36 @@ async function fetchAllAddresses() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// EXECUTION ENGINE — wave-based with resume
+// EXECUTION ENGINE — true per-wave payloads with per-wave resume
 // ═══════════════════════════════════════════════════════════
-async function executePlan(plan, addresses, waveFilter) {
-  const wave = waveFilter ? plan.filter(waveFilter) : plan;
+async function executePlan(plan, addresses, waveDef, runContext) {
+  const addrMap = new Map(addresses.map(a => [a.id, a]));
+  const wave = getWaveEntries(plan, waveDef).map(entry => ({
+    ...entry,
+    payload: buildWavePayload(addrMap.get(entry.id), entry, waveDef.tags),
+  }));
+
   if (wave.length === 0) {
-    log("⏭️", "No entries in this wave.");
-    return { ok: 0, fail: 0 };
+    log("⏭️", "No entries in " + waveDef.reviewLabel + ".");
+    return { ok: 0, fail: 0, aborted: false };
   }
 
   if (DRY_RUN) {
-    log("🔒", \`DRY RUN — \${wave.length} entries would be modified.\`);
-    return { ok: 0, fail: 0 };
+    log("🔒", "DRY RUN — " + wave.length + " " + waveDef.reviewLabel + " entries would be modified.");
+    return { ok: 0, fail: 0, aborted: false };
   }
 
-  // Resume support
-  const STORAGE_KEY = "alba_cleanup_progress";
+  const STORAGE_KEY = "alba_cleanup_progress:" + runContext.fingerprint + ":" + waveDef.key;
   const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
-  const startIdx = saved.lastCompleted || 0;
+  const startIdx = saved.waveSize === wave.length ? (saved.lastCompleted || 0) : 0;
   if (startIdx > 0) {
-    log("🔄", \`Resuming from index \${startIdx} (of \${wave.length})\`);
+    log("🔄", "Resuming " + waveDef.reviewLabel + " from index " + startIdx + " (of " + wave.length + ")");
   }
 
   let ok = 0;
   let fail = 0;
   let consecutiveFails = 0;
+  let aborted = false;
   const errors = [];
 
   for (let i = startIdx; i < wave.length; i++) {
@@ -197,27 +258,29 @@ async function executePlan(plan, addresses, waveFilter) {
       consecutiveFails = 0;
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
         lastCompleted: i + 1,
+        waveSize: wave.length,
         timestamp: Date.now(),
       }));
     } catch (err) {
       fail++;
       consecutiveFails++;
       errors.push({ id: op.id, tags: [...op.tags].join(","), error: err.message });
-      log("❌", \`ID \${op.id}: \${err.message}\`);
+      log("❌", "ID " + op.id + ": " + err.message);
       if (consecutiveFails >= 10) {
         log("🛑", "10 consecutive failures — aborting. Check window.__albaErrors.");
         window.__albaErrors = errors;
+        aborted = true;
         break;
       }
     }
 
     if ((i + 1) % 100 === 0 || i === wave.length - 1)
-      log("📝", \`\${i + 1}/\${wave.length} — \${ok} ok, \${fail} failed\`);
+      log("📝", (i + 1) + "/" + wave.length + " — " + ok + " ok, " + fail + " failed");
 
-    // Batch pause
     if (CONFIG.BATCH_SIZE > 0 && (i + 1) % CONFIG.BATCH_SIZE === 0 && i < wave.length - 1) {
-      log("⏸️", \`Pausing at \${i + 1}. Call window.__albaContinue() to resume.\`);
-      await new Promise(resolve => { window.__albaContinue = resolve; });
+      await waitForManualContinue(
+        "Paused " + waveDef.reviewLabel + " at " + (i + 1) + "/" + wave.length + ". Review progress, then call window.__albaContinue() to resume this wave."
+      );
     }
 
     await sleep(CONFIG.WRITE_DELAY_MS);
@@ -226,13 +289,13 @@ async function executePlan(plan, addresses, waveFilter) {
   if (fail === 0) localStorage.removeItem(STORAGE_KEY);
 
   logSection("WAVE COMPLETE");
-  log("✅", \`Success: \${ok}\`);
+  log("✅", "Success: " + ok);
   if (fail > 0) {
-    log("❌", \`Failed: \${fail}\`);
+    log("❌", "Failed: " + fail);
     window.__albaErrors = errors;
     console.table(errors.slice(0, 50));
   }
-  return { ok, fail };
+  return { ok, fail, aborted };
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -325,14 +388,38 @@ function logPlanSummary(plan) {
     const plan = buildPlan(addresses, dedup, statuses, languages, jitterChanges, CONFIG, suiteless);
     logPlanSummary(plan);
 
+    const runContext = {
+      fingerprint: buildDatasetFingerprint(addresses, plan),
+    };
+    const waveCounts = WAVE_DEFS.map(wave => ({
+      key: wave.key,
+      title: wave.title,
+      entries: getWaveEntries(plan, wave).length,
+    }));
+
     // Store for inspection
     window.__albaPlan = plan;
     window.__albaAddresses = addresses;
+    window.__albaAnalysis = {
+      dedup,
+      suiteless,
+      statuses,
+      languages,
+      jitterChanges,
+    };
+    window.__albaWaves = waveCounts;
+    window.__albaRunWave = async (key) => {
+      const wave = WAVE_DEFS.find(item => item.key === key);
+      if (!wave) throw new Error("Unknown wave: " + key);
+      return executePlan(plan, addresses, wave, runContext);
+    };
 
     if (DRY_RUN) {
       logSection("DRY RUN COMPLETE");
       log("🔒", "No changes made. Inspect the plan:");
       log("💡", "  __albaPlan                                         — full plan array");
+      log("💡", "  __albaAnalysis                                     — exact analysis objects");
+      log("💡", "  __albaWaves                                        — per-wave unique PUT counts");
       log("💡", "  __albaPlan.filter(p => p.tags.has('set-duplicate')) — dedup losers");
       log("💡", "  __albaPlan.filter(p => p.tags.has('set-duplicate-suiteless')) — suiteless losers");
       log("💡", "  __albaPlan.filter(p => p.tags.has('dup-to-new'))   — stale dup→new");
@@ -340,24 +427,34 @@ function logPlanSummary(plan) {
       log("💡", "  __albaPlan.filter(p => p.tags.has('merge-notes'))  — note merges");
       log("💡", "Flip DRY_RUN to false and re-run to execute.");
       log("💡", "");
-      log("💡", "── WAVE EXECUTION (when ready) ──");
-      log("💡", "Wave 1 (dedup):    executePlan(plan, addresses, p => p.tags.has('set-duplicate') || p.tags.has('set-duplicate-suiteless') || p.tags.has('merge-notes') || p.tags.has('merge-notes-suiteless'))");
-      log("💡", "Wave 2 (dup→new):  executePlan(plan, addresses, p => p.tags.has('dup-to-new'))");
-      log("💡", "Wave 3 (language):  executePlan(plan, addresses, p => p.tags.has('set-language'))");
-      log("💡", "Wave 4 (jitter):   executePlan(plan, addresses, p => p.tags.has('jitter'))");
+      log("💡", "── OPTIONAL MANUAL WAVE EXECUTION ──");
+      log("💡", "window.__albaRunWave('dedup')");
+      log("💡", "window.__albaRunWave('dup-to-new')");
+      log("💡", "window.__albaRunWave('language')");
+      log("💡", "window.__albaRunWave('jitter')");
     } else {
-      logSection("EXECUTING — WAVE 1: Deduplication");
-      await executePlan(plan, addresses,
-        p => p.tags.has("set-duplicate") || p.tags.has("set-duplicate-suiteless") || p.tags.has("merge-notes") || p.tags.has("merge-notes-suiteless"));
+      const wavesToRun = WAVE_DEFS.filter(wave => getWaveEntries(plan, wave).length > 0);
 
-      logSection("EXECUTING — WAVE 2: Dup→New");
-      await executePlan(plan, addresses, p => p.tags.has("dup-to-new"));
+      for (let i = 0; i < wavesToRun.length; i++) {
+        const wave = wavesToRun[i];
+        const nextWave = wavesToRun[i + 1];
 
-      logSection("EXECUTING — WAVE 3: Language");
-      await executePlan(plan, addresses, p => p.tags.has("set-language"));
+        logSection("EXECUTING — " + wave.title);
+        const result = await executePlan(plan, addresses, wave, runContext);
 
-      logSection("EXECUTING — WAVE 4: Jitter");
-      await executePlan(plan, addresses, p => p.tags.has("jitter"));
+        if (result.fail > 0 || result.aborted) {
+          logSection("EXECUTION STOPPED");
+          log("🛑", "Stopped after " + wave.reviewLabel + ". Review the errors before continuing.");
+          break;
+        }
+
+        if (nextWave) {
+          logSection("PAUSED FOR REVIEW");
+          await waitForManualContinue(
+            "Review " + wave.reviewLabel + " in Alba, then call window.__albaContinue() to start " + nextWave.title + "."
+          );
+        }
+      }
     }
   } catch (err) {
     console.error("💥 Fatal error:", err);

@@ -5,6 +5,9 @@ import { DEFAULT_CONFIG } from "../src/config.js";
 import {
   norm,
   truncateNotes,
+  WAVE_TAGS,
+  entryHasAnyTag,
+  buildWavePayload,
   filterChineseLanguages,
   scoreEntry,
   analyzeDeduplication,
@@ -647,6 +650,28 @@ describe("buildPlan()", () => {
           "DNC status must NEVER be overwritten");
       }
     });
+
+    it("never downgrades an exact-duplicate DNC loser", () => {
+      const addrs = [
+        makeAddr({ id: 1, address: "100 Main St", suite: "1A", status: S.DNC, notes: "first" }),
+        makeAddr({ id: 2, address: "100 Main St", suite: "1A", status: S.DNC, notes: "second", telephone: "555" }),
+      ];
+      const dedup = analyzeDeduplication(addrs, cfg);
+      const statuses = analyzeStatuses(addrs, cfg);
+      const languages = analyzeLanguages(addrs, cfg);
+      const plan = buildPlan(addrs, dedup, statuses, languages, [], cfg);
+
+      const dncLoserEntry = plan.find((p) => p.id === 1);
+      assert.equal(
+        dncLoserEntry,
+        undefined,
+        "A DNC loser should be left unchanged rather than downgraded to Duplicate"
+      );
+
+      const keeperEntry = plan.find((p) => p.id === 2);
+      assert.ok(keeperEntry, "The DNC keeper can still receive merged notes");
+      assert.equal(keeperEntry.payload.status, S.DNC);
+    });
   });
 
   // ── Note merging ──
@@ -725,6 +750,77 @@ describe("makePayload()", () => {
     assert.equal(makePayload(addr).is_gated, 0);
     const addr2 = makeAddr({ is_gated: true });
     assert.equal(makePayload(addr2).is_gated, 1);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
+// Wave helpers
+// ═══════════════════════════════════════════════════════════
+describe("wave helpers", () => {
+  it("entryHasAnyTag matches entries for a wave", () => {
+    const entry = {
+      id: 1,
+      tags: new Set(["set-duplicate", "jitter"]),
+      payload: {},
+    };
+    assert.equal(entryHasAnyTag(entry, WAVE_TAGS.dedup), true);
+    assert.equal(entryHasAnyTag(entry, WAVE_TAGS.language), false);
+    assert.equal(entryHasAnyTag(entry, WAVE_TAGS.jitter), true);
+  });
+
+  it("buildWavePayload isolates dedup changes from jitter changes", () => {
+    const original = makeAddr({
+      id: 1,
+      address: "100 Main St",
+      status: S.NEW,
+      notes: "original",
+      location_lat: 40.75,
+      location_lng: -73.87,
+    });
+    const entry = {
+      id: 1,
+      tags: new Set(["set-duplicate", "merge-notes", "jitter"]),
+      payload: {
+        ...makePayload(original),
+        status: S.DUPLICATE,
+        notes: "original; merged",
+        location_lat: 40.751,
+        location_lng: -73.871,
+      },
+    };
+
+    const dedupPayload = buildWavePayload(original, entry, WAVE_TAGS.dedup);
+    assert.equal(dedupPayload.status, S.DUPLICATE);
+    assert.equal(dedupPayload.notes, "original; merged");
+    assert.equal(dedupPayload.location_lat, original.location_lat);
+    assert.equal(dedupPayload.location_lng, original.location_lng);
+
+    const jitterPayload = buildWavePayload(original, entry, WAVE_TAGS.jitter);
+    assert.equal(jitterPayload.status, original.status);
+    assert.equal(jitterPayload.notes, original.notes);
+    assert.equal(jitterPayload.location_lat, 40.751);
+    assert.equal(jitterPayload.location_lng, -73.871);
+  });
+
+  it("buildWavePayload isolates language changes from status changes", () => {
+    const original = makeAddr({ id: 1, language_id: 0, status: S.DUPLICATE });
+    const entry = {
+      id: 1,
+      tags: new Set(["dup-to-new", "set-language"]),
+      payload: {
+        ...makePayload(original),
+        status: S.NEW,
+        language_id: cfg.DEFAULT_LANGUAGE_ID,
+      },
+    };
+
+    const languagePayload = buildWavePayload(original, entry, WAVE_TAGS.language);
+    assert.equal(languagePayload.status, original.status);
+    assert.equal(languagePayload.language_id, cfg.DEFAULT_LANGUAGE_ID);
+
+    const dupToNewPayload = buildWavePayload(original, entry, WAVE_TAGS.dupToNew);
+    assert.equal(dupToNewPayload.status, S.NEW);
+    assert.equal(dupToNewPayload.language_id, original.language_id);
   });
 });
 
