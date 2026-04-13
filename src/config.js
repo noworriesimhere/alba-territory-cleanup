@@ -34,4 +34,7 @@ export const DEFAULT_CONFIG = {
   RADAR_STEP_DEG: -15,
   RADAR_ATTEMPTS: 24,
   COLLISION_THRESHOLD: 0.000014,
+
+  // Notes field limit (API rejects above this — run recon-notes-limit.js to find exact value)
+  MAX_NOTES_LENGTH: 2000,
 };

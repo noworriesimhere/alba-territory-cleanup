@@ -9,6 +9,22 @@
 export const norm = (s) => (s || "").toLowerCase().trim();
 
 // ───────────────────────────────────────────────────────────
+// Notes truncation — the API rejects notes above a certain
+// length. Truncate at the last semicolon boundary before the
+// limit, and append a marker so we know it was cut.
+// ───────────────────────────────────────────────────────────
+export function truncateNotes(notes, config) {
+  const max = config.MAX_NOTES_LENGTH;
+  if (!notes || !max || notes.length <= max) return notes;
+  const marker = " [+truncated]";
+  const cutAt = max - marker.length;
+  // Try to cut at a semicolon boundary to avoid splitting a note mid-word
+  const lastSemi = notes.lastIndexOf(";", cutAt);
+  const breakPoint = lastSemi > cutAt * 0.5 ? lastSemi : cutAt;
+  return notes.slice(0, breakPoint).trimEnd() + marker;
+}
+
+// ───────────────────────────────────────────────────────────
 // Language discovery (pure filter — the API fetch is in the
 // browser harness; this just classifies what came back)
 // ───────────────────────────────────────────────────────────
@@ -96,7 +112,7 @@ export function analyzeDeduplication(addresses, config) {
       mergeItems,
       newKeeperNotes:
         mergeItems.length > 0
-          ? [existing, ...mergeItems].filter(Boolean).join("; ")
+          ? truncateNotes([existing, ...mergeItems].filter(Boolean).join("; "), config)
           : null,
     });
   }
@@ -187,7 +203,7 @@ export function analyzeSuitelessDuplicates(addresses, config) {
       mergeItems,
       newKeeperNotes:
         mergeItems.length > 0
-          ? [existing, ...mergeItems].filter(Boolean).join("; ")
+          ? truncateNotes([existing, ...mergeItems].filter(Boolean).join("; "), config)
           : null,
     });
   }
@@ -457,7 +473,9 @@ export function buildPlan(addresses, dedup, statuses, languages, jitterChanges, 
           (item) => !seen.has(item.toLowerCase().trim())
         );
         if (extra.length > 0) {
-          entry.payload.notes = [current, ...extra].filter(Boolean).join("; ");
+          entry.payload.notes = truncateNotes(
+            [current, ...extra].filter(Boolean).join("; "), config
+          );
           entry.tags.add("merge-notes-suiteless");
         }
       }

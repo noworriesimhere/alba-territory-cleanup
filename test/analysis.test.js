@@ -4,6 +4,7 @@ import { makeAddr, resetIdCounter } from "./helpers.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import {
   norm,
+  truncateNotes,
   filterChineseLanguages,
   scoreEntry,
   analyzeDeduplication,
@@ -33,6 +34,44 @@ describe("norm()", () => {
     assert.equal(norm(null), "");
     assert.equal(norm(undefined), "");
     assert.equal(norm(""), "");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
+// truncateNotes()
+// ═══════════════════════════════════════════════════════════
+describe("truncateNotes()", () => {
+  it("returns short notes unchanged", () => {
+    assert.equal(truncateNotes("short note", cfg), "short note");
+  });
+
+  it("returns null/empty unchanged", () => {
+    assert.equal(truncateNotes(null, cfg), null);
+    assert.equal(truncateNotes("", cfg), "");
+  });
+
+  it("truncates at semicolon boundary when over limit", () => {
+    const tinyConfig = { ...cfg, MAX_NOTES_LENGTH: 50 };
+    const notes = "note one; note two; note three; note four; note five; note six";
+    const result = truncateNotes(notes, tinyConfig);
+    assert.ok(result.length <= 50, `Result ${result.length} > 50`);
+    assert.ok(result.endsWith("[+truncated]"));
+    // Should have cut at a semicolon
+    assert.ok(!result.includes("note six"));
+  });
+
+  it("truncates mid-word if no good semicolon boundary", () => {
+    const tinyConfig = { ...cfg, MAX_NOTES_LENGTH: 30 };
+    const notes = "A".repeat(100);
+    const result = truncateNotes(notes, tinyConfig);
+    assert.ok(result.length <= 30, `Result ${result.length} > 30`);
+    assert.ok(result.endsWith("[+truncated]"));
+  });
+
+  it("does nothing when MAX_NOTES_LENGTH is not set", () => {
+    const noLimitConfig = { ...cfg, MAX_NOTES_LENGTH: 0 };
+    const longNotes = "X".repeat(5000);
+    assert.equal(truncateNotes(longNotes, noLimitConfig), longNotes);
   });
 });
 
@@ -737,15 +776,32 @@ describe("edge cases: massive apartment building (75 copies)", () => {
     assert.equal(dedup.actions.length, 1);
     assert.equal(dedup.actions[0].losers.length, 74);
 
-    // Verify notes are all collected
+    // Verify notes are merged and within the limit
     const merged = dedup.actions[0].newKeeperNotes;
     assert.ok(merged, "Should have merged notes");
     assert.ok(merged.includes("keeper note"));
-    // Notes should contain unique entries from losers
-    assert.ok(merged.includes("loser note 2"));
-    assert.ok(merged.includes("loser note 75"));
-    // Verify note length is reasonable (not truncated by our logic)
-    assert.ok(merged.length > 100, "Merged notes should be substantial");
+    assert.ok(merged.length <= cfg.MAX_NOTES_LENGTH,
+      `Merged notes (${merged.length}) must not exceed MAX_NOTES_LENGTH (${cfg.MAX_NOTES_LENGTH})`);
+  });
+
+  it("truncates merged notes when they exceed the limit", () => {
+    const smallCfg = { ...cfg, MAX_NOTES_LENGTH: 200 };
+    const addrs = [
+      makeAddr({ id: 1, address: "100 Main St", status: S.NEW, notes: "keeper note" }),
+    ];
+    for (let i = 2; i <= 75; i++) {
+      addrs.push(makeAddr({
+        id: i,
+        address: "100 Main St",
+        status: S.VALID,
+        notes: `loser note ${i} with extra detail`,
+      }));
+    }
+    const dedup = analyzeDeduplication(addrs, smallCfg);
+    const merged = dedup.actions[0].newKeeperNotes;
+    assert.ok(merged.length <= 200, `Got ${merged.length}, expected ≤200`);
+    assert.ok(merged.endsWith("[+truncated]"));
+    assert.ok(merged.includes("keeper note"), "Keeper notes should survive truncation");
   });
 });
 
